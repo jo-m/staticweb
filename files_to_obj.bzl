@@ -1,24 +1,31 @@
 # https://balau82.wordpress.com/2012/02/19/linking-a-binary-blob-with-gcc/
+# https://github.com/bazelbuild/rules_cc/blob/262ebec3c2296296526740db4aefce68c80de7fa/examples/my_c_archive/my_c_archive.bzl
+
+load("@rules_cc//cc:action_names.bzl", "CPP_LINK_STATIC_LIBRARY_ACTION_NAME")
 
 HEADER_TEMPLATE = """
 extern unsigned char blob_59b0d9568c778e76193bde5e3b5cc5e713f3a14daeba405e7d8f129d775c11cf_start;
 extern unsigned char blob_59b0d9568c778e76193bde5e3b5cc5e713f3a14daeba405e7d8f129d775c11cf_size;
 """
 
+def mangle_name(name):
+    """
+    Implementation of mangle_name() from binutils bfd/binary.c
+
+    Replace every char not in [A-Za-z0-9] with '_'
+    """
+    return ''.join([c if c.isalnum() else '_' for c in name.elems()])
+
+
 def _impl(ctx):
     files = []
 
-    files_by_hash = ctx.actions.declare_directory(ctx.outputs.lib.path + ".by_hash")
-
-    ctx.actions.run_shell(
-        outputs = [files_by_hash],
-        command = "mkdir -p %s" % (files_by_hash.path),
-    )
-
+    # for each input file
     for input_file in ctx.files.srcs:
         hash_file = ctx.actions.declare_file(input_file.path + ".hash")
         obj_file = ctx.actions.declare_file(input_file.path + ".o")
 
+        # write its hash + path into *.hash file
         ctx.actions.run_shell(
             outputs = [hash_file],
             inputs = [input_file],
@@ -26,11 +33,12 @@ def _impl(ctx):
             command = "sha256sum %s > %s" % (input_file.path, hash_file.path),
         )
 
-        sym_name = '_binary_' + input_file.path.replace('/', '_').replace('.', '_')
-
+        # create a *.o file, with symbol name derived from hash
+        # TODO do not hardcode arch
+        sym_name = '_binary_' + mangle_name(input_file.path)
         ctx.actions.run_shell(
             outputs = [obj_file],
-            inputs = [input_file, hash_file, files_by_hash],
+            inputs = [input_file, hash_file],
             progress_message = "Converting to ELF for %s" % input_file.short_path,
             command = """
                 hash="$(cat %s | awk '{print $1}')"
@@ -44,6 +52,7 @@ def _impl(ctx):
 
         files.append((obj_file, hash_file))
 
+    # create a file containing all hashes + paths
     hashes = ctx.actions.declare_file(ctx.outputs.lib.path + ".txt")
     ctx.actions.run_shell(
         outputs = [hashes],
@@ -52,6 +61,7 @@ def _impl(ctx):
     )
 
     # write ar script
+    # TODO make this portable
     ar_script_content = "CREATE %s\n" % ctx.outputs.lib.path
     for f in files:
         ar_script_content += "ADDMOD '%s'\n" % f[0].path
