@@ -1,2 +1,7 @@
-/public/
+/webroot/
+
+# bazel
 bazel-*
+
+# make
+/build/

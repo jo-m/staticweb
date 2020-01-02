@@ -1,11 +1,42 @@
-# https://balau82.wordpress.com/2012/02/19/linking-a-binary-blob-with-gcc/
-# https://github.com/bazelbuild/rules_cc/blob/262ebec3c2296296526740db4aefce68c80de7fa/examples/my_c_archive/my_c_archive.bzl
-
 load("@rules_cc//cc:action_names.bzl", "CPP_LINK_STATIC_LIBRARY_ACTION_NAME")
 
-HEADER_TEMPLATE = """
-extern unsigned char blob_59b0d9568c778e76193bde5e3b5cc5e713f3a14daeba405e7d8f129d775c11cf_start;
-extern unsigned char blob_59b0d9568c778e76193bde5e3b5cc5e713f3a14daeba405e7d8f129d775c11cf_size;
+# TODO: Factor out to file
+HASHES_TO_HEADER_PY = """
+import sys
+
+def hashes_paths():
+    with open(sys.argv[1], 'r') as f:
+        for line in f.readlines():
+            hash, _, path = line.strip().partition(' ')
+            yield hash, path[1:]
+
+hashes_paths = list(hashes_paths())
+
+for hash, path in hashes_paths:
+    print(f"extern unsigned char blob_{hash}_start;")
+    print(f"extern unsigned char blob_{hash}_end;")
+    print(f"extern unsigned char blob_{hash}_size;")
+
+print('typedef struct static_file {')
+print('    char *hash;')
+print('    // length of hash in bytes, excluding terminating 0 char')
+print('    size_t hash_len;')
+print('    char *path;')
+print('    // length of path in bytes, excluding terminating 0 char')
+print('    size_t path_len;')
+print('    // file contents, no terminating 0 char')
+print('    void *data;')
+print('    // size of file contents in bytes')
+print('    size_t data_len;')
+print('} static_file;')
+
+print('const static static_file static_files[] = {')
+for hash, path in hashes_paths:
+    assert not '"' in path
+    assert not '"' in hash
+    print(f'{{ "{hash}", {len(hash)}, "{path}", {len(path)}, ((void *)&blob_{hash}_start), ((size_t)&blob_{hash}_size)}},')
+print('};')
+print(f'const static size_t static_files_len = {len(hashes_paths)};')
 """
 
 def mangle_name(name):
@@ -55,7 +86,8 @@ def build_cc_info(ctx, lib, header):
 
 def create_static_lib(ctx, output_lib, obj_files):
     # write ar script
-    # TODO do it like here: https://github.com/bazelbuild/rules_cc/blob/262ebec3c2296296526740db4aefce68c80de7fa/examples/my_c_archive/my_c_archive.bzl#L42
+    # TODO use ar from toolchain:
+    # https://github.com/bazelbuild/rules_cc/blob/262ebec3c2296296526740db4aefce68c80de7fa/examples/my_c_archive/my_c_archive.bzl#L42
     ar_script_content = "CREATE %s\n" % ctx.outputs.lib.path
     for f in obj_files:
         ar_script_content += "ADDMOD '%s'\n" % f.path
@@ -71,8 +103,6 @@ def create_static_lib(ctx, output_lib, obj_files):
         inputs = obj_files + [ar_script],
         command = "/usr/bin/ar -M < %s" % (ar_script.path)
     )
-
-    ctx.actions.write(output=ctx.outputs.header, content=HEADER_TEMPLATE)
 
 
 def _impl(ctx):
@@ -93,6 +123,7 @@ def _impl(ctx):
         )
 
         # create a *.o file, with symbol name derived from hash
+        # TODO: gzip contents before
         sym_name = '_binary_' + mangle_name(input_file.path)
         arch = 'x86-64'
         ctx.actions.run_shell(
@@ -119,11 +150,19 @@ def _impl(ctx):
         files.append((obj_file, hash_file))
 
     # create a file containing all hashes + paths
-    hashes = ctx.actions.declare_file(ctx.outputs.lib.path + ".txt")
     ctx.actions.run_shell(
-        outputs = [hashes],
+        outputs = [ctx.outputs.hashes],
         inputs = [f[1] for f in files],
-        command = "cat %s > %s" % (' '.join(["'{}'".format(f[1].path) for f in files]), hashes.path),
+        command = "cat %s > %s" % (' '.join(["'{}'".format(f[1].path) for f in files]), ctx.outputs.hashes.path),
+    )
+
+    # create header file
+    py_script = ctx.actions.declare_file(ctx.outputs.lib.path + ".py")
+    ctx.actions.write(output=py_script, content=HASHES_TO_HEADER_PY)
+    ctx.actions.run_shell(
+        outputs = [ctx.outputs.header],
+        inputs = [ctx.outputs.hashes, py_script],
+        command = "/usr/bin/env python3 %s %s > %s" % (py_script.path, ctx.outputs.hashes.path, ctx.outputs.header.path)
     )
 
     create_static_lib(ctx, ctx.outputs.lib, [f[0] for f in files])
@@ -137,6 +176,7 @@ files_to_obj = rule(
         "_cc_toolchain": attr.label(default = Label("@bazel_tools//tools/cpp:current_cc_toolchain")),
     },
     outputs = {
+        "hashes": "%{name}.hashes.txt",
         "header": "%{name}.h",
         "lib": "%{name}.a",
     },

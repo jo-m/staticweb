@@ -1,0 +1,3 @@
+# ~/.ackrc
+--ignore-dir=webroot
+--ignore-dir=build
